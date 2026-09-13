@@ -1,0 +1,72 @@
+#!/bin/bash
+# Keep Omarchy from locking or blanking the display while audio is playing.
+# HDMI and DisplayPort sinks go silent when the display sleeps.
+
+set -euo pipefail
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/indicators"
+STAY_AWAKE="$STATE_DIR/stay-awake"
+OWNED="$STATE_DIR/audio-idle-inhibit"
+POLL_SECONDS="${AUDIO_IDLE_INHIBIT_POLL:-2}"
+LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/audio-idle-inhibit.lock"
+
+need() {
+  command -v "$1" >/dev/null || {
+    echo "audio-idle-inhibit: missing $1" >&2
+    exit 1
+  }
+}
+
+need pactl
+need jq
+
+mkdir -p "$STATE_DIR"
+
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "audio-idle-inhibit: already running" >&2
+  exit 0
+fi
+
+release_if_owned() {
+  if [[ -f $OWNED ]]; then
+    rm -f "$OWNED" "$STAY_AWAKE"
+    echo "audio-idle-inhibit: allowing idle"
+  fi
+}
+
+trap release_if_owned EXIT INT TERM
+
+# 0 = playing, 1 = idle, 2 = unknown (leave current inhibit state alone)
+audio_state() {
+  local json
+  json=$(pactl --format=json list sink-inputs 2>/dev/null) || return 2
+  jq -e 'any(.[]; (.corked | not) and (.mute | not))' >/dev/null <<<"$json"
+}
+
+playing_names() {
+  local json
+  json=$(pactl --format=json list sink-inputs 2>/dev/null) || return 0
+  jq -r '.[] | select((.corked | not) and (.mute | not)) | .properties["application.name"] // "audio"' <<<"$json" \
+    | paste -sd ', ' -
+}
+
+while true; do
+  status=0
+  audio_state || status=$?
+
+  case $status in
+    0)
+      if [[ ! -f $STAY_AWAKE ]]; then
+        mkdir -p "$STATE_DIR"
+        touch "$STAY_AWAKE" "$OWNED"
+        echo "audio-idle-inhibit: staying awake ($(playing_names))"
+      fi
+      ;;
+    1)
+      release_if_owned
+      ;;
+  esac
+
+  sleep "$POLL_SECONDS"
+done
