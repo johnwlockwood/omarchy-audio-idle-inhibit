@@ -10,6 +10,7 @@ Type=simple
 ExecStart=%h/.local/bin/audio-idle-inhibit
 Restart=always
 RestartSec=3
+SuccessExitStatus=143
 
 [Install]
 WantedBy=graphical-session.target
